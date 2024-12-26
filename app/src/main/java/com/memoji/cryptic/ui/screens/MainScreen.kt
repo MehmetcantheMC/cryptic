@@ -317,6 +317,7 @@ fun MainScreen() {
                                     isCalculating = true
                                     val startTime = System.currentTimeMillis()
                                     var position = jobPacket.startPosition
+                                    var lastPosition = position
                                     
                                     while (isActive && position <= jobPacket.endPosition) {
                                         val batchEndPosition = minOf(
@@ -342,8 +343,10 @@ fun MainScreen() {
                                         
                                         val now = System.currentTimeMillis()
                                         if (now - lastAttemptTime >= 1000) {
-                                            attemptsPerSecond = position * 1000 / (now - startTime)
+                                            val attemptsDone = position - lastPosition
+                                            attemptsPerSecond = attemptsDone * 1000 / (now - lastAttemptTime)
                                             lastAttemptTime = now
+                                            lastPosition = position
                                         }
                                     }
                                     

@@ -16,9 +16,9 @@ class PasswordCracker {
             '?', '/', '`', '~', ' '
         )
 
-        const val PACKET_SIZE = 60000L
+        const val PACKET_SIZE = 1000000L
         const val MAX_PASSWORD_LENGTH = 8 // Maximum password length to try
-        const val BATCH_SIZE = 100 // Process passwords in larger batches
+        const val BATCH_SIZE = 5000 // Process passwords in larger batches
         
         // Get number of available processors at runtime
         private val PARALLEL_THREADS = Runtime.getRuntime().availableProcessors()
