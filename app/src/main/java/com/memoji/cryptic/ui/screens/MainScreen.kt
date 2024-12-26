@@ -1,6 +1,8 @@
 package com.memoji.cryptic.ui.screens
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -29,10 +31,12 @@ fun MainScreen() {
     var lastAttemptTime by remember { mutableStateOf(0L) }
     var currentResult by remember { mutableStateOf<PasswordCracker.CrackResult?>(null) }
     
+    // Job packet tracking
+    var completedPackets by remember { mutableStateOf(0) }
+    var currentPacket by remember { mutableStateOf<PasswordCracker.JobPacket?>(null) }
+    var simulatedNextPacket by remember { mutableStateOf("0") }
+    
     // Cracking configuration
-    val totalNodes = 2 // Fixed to 2 instances
-    var selectedNode by remember { mutableStateOf<Int?>(null) }
-    var searchRange by remember { mutableStateOf<PasswordCracker.SearchRange?>(null) }
     var password by remember { mutableStateOf("") }
     var targetHash by remember { mutableStateOf("") }
     
@@ -56,6 +60,7 @@ fun MainScreen() {
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                .verticalScroll(rememberScrollState())
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
@@ -77,6 +82,24 @@ fun MainScreen() {
                     modifier = Modifier.padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
+                    Text(
+                        text = "Simulation Controls",
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                    OutlinedTextField(
+                        value = simulatedNextPacket,
+                        onValueChange = { 
+                            if (it.isEmpty() || it.all { char -> char.isDigit() }) {
+                                simulatedNextPacket = it
+                            }
+                        },
+                        label = { Text("Next Job Packet Number") },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !isCalculating
+                    )
+                    
+                    Divider(modifier = Modifier.padding(vertical = 8.dp))
+
                     Text(
                         text = "Password Configuration",
                         style = MaterialTheme.typography.titleMedium
@@ -101,34 +124,35 @@ fun MainScreen() {
                     Divider(modifier = Modifier.padding(vertical = 8.dp))
                     
                     Text(
-                        text = "Select Instance",
+                        text = "Password Cracking Progress",
                         style = MaterialTheme.typography.titleMedium
                     )
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceEvenly
-                    ) {
-                        FilterChip(
-                            selected = selectedNode == 0,
-                            onClick = { 
-                                if (!isCalculating) selectedNode = 0 
-                            },
-                            label = { Text("Instance 1") },
-                            enabled = !isCalculating
-                        )
-                        FilterChip(
-                            selected = selectedNode == 1,
-                            onClick = { 
-                                if (!isCalculating) selectedNode = 1 
-                            },
-                            label = { Text("Instance 2") },
-                            enabled = !isCalculating
-                        )
-                    }
                     
-                    searchRange?.let { range ->
+                    if (isCalculating) {
+                        currentPacket?.let { packet ->
+                            Text(
+                                text = "Current Job Packet: #${packet.packetNumber}",
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            Text(
+                                text = "Testing password length: ${packet.passwordLength}",
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            Text(
+                                text = "Range: ${packet.startPosition} - ${packet.endPosition}",
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        }
                         Text(
-                            text = "Search Range: ${range.start} to ${range.end}",
+                            text = "Completed Packets: $completedPackets",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Text(
+                            text = "Current password: ${currentResult?.password ?: ""}",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Text(
+                            text = "Attempts: $currentAttempt ($attemptsPerSecond/s)",
                             style = MaterialTheme.typography.bodyMedium
                         )
                     }
@@ -259,64 +283,115 @@ fun MainScreen() {
                 }
             }
 
-            Button(
-                onClick = {
-                    if (isCalculating) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Button(
+                    onClick = {
+                        if (isCalculating) {
+                            calculationJob?.cancel()
+                            isCalculating = false
+                        } else if (targetHash.isNotEmpty()) {
+                            try {
+                                // Get next job packet
+                                val packetNumber = simulatedNextPacket.toIntOrNull() ?: 0
+                                val jobPacket = PasswordCracker.getNextJobPacket(packetNumber)
+                                
+                                if (!jobPacket.isValid) {
+                                    currentResult = PasswordCracker.CrackResult(
+                                        password = "All possible lengths tried up to ${PasswordCracker.MAX_PASSWORD_LENGTH}",
+                                        hash = "",
+                                        attempt = 0,
+                                        found = false
+                                    )
+                                    return@Button
+                                }
+                                
+                                currentPacket = jobPacket
+                                currentAttempt = jobPacket.startPosition
+                                attemptsPerSecond = 0
+                                lastAttemptTime = System.currentTimeMillis()
+                                
+                                calculationJob = scope.launch(Dispatchers.Default) {
+                                    isCalculating = true
+                                    val startTime = System.currentTimeMillis()
+                                    var position = jobPacket.startPosition
+                                    
+                                    while (isActive && position <= jobPacket.endPosition) {
+                                        val batchEndPosition = minOf(
+                                            position + PasswordCracker.BATCH_SIZE,
+                                            jobPacket.endPosition + 1
+                                        )
+                                        
+                                        val result = PasswordCracker.attemptCrackParallel(
+                                            targetHash,
+                                            position,
+                                            batchEndPosition,
+                                            jobPacket.passwordLength,
+                                            this
+                                        )
+                                        
+                                        currentResult = result
+                                        if (result?.found == true) {
+                                            break
+                                        }
+                                        
+                                        position = batchEndPosition
+                                        currentAttempt = position
+                                        
+                                        val now = System.currentTimeMillis()
+                                        if (now - lastAttemptTime >= 1000) {
+                                            attemptsPerSecond = position * 1000 / (now - startTime)
+                                            lastAttemptTime = now
+                                        }
+                                    }
+                                    
+                                    if (!currentResult?.found!! && currentAttempt > jobPacket.endPosition) {
+                                        completedPackets++
+                                        currentResult = currentResult?.copy(
+                                            password = "Packet completed - no match found"
+                                        )
+                                    }
+                                    isCalculating = false
+                                }
+                            } catch (e: NumberFormatException) {
+                                // Handle invalid input
+                            }
+                        }
+                    },
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (isCalculating) 
+                            MaterialTheme.colorScheme.error 
+                        else 
+                            MaterialTheme.colorScheme.primary
+                    ),
+                    enabled = !isCalculating && targetHash.isNotEmpty()
+                ) {
+                    Text(
+                        text = "Request New Job Packet",
+                        modifier = Modifier.padding(8.dp)
+                    )
+                }
+
+                Button(
+                    onClick = {
                         calculationJob?.cancel()
                         isCalculating = false
-                    } else if (selectedNode != null && targetHash.isNotEmpty()) {
-                        try {
-                            searchRange = PasswordCracker.calculateRange(totalNodes, selectedNode!!, password.length)
-                            currentAttempt = searchRange?.start ?: 0
-                            attemptsPerSecond = 0
-                            lastAttemptTime = System.currentTimeMillis()
-                            
-                            calculationJob = scope.launch(Dispatchers.Default) {
-                                isCalculating = true
-                                val startTime = System.currentTimeMillis()
-                                val endAttempt = searchRange?.end ?: 0
-                                
-                                while (isActive && currentAttempt <= endAttempt) {
-                                    val result = PasswordCracker.attemptCrack(targetHash, currentAttempt, password.length)
-                                    currentResult = result
-                                    
-                                    if (result.found) {
-                                        break
-                                    }
-                                    
-                                    currentAttempt++
-                                    
-                                    val now = System.currentTimeMillis()
-                                    if (now - lastAttemptTime >= 1000) {
-                                        attemptsPerSecond = currentAttempt * 1000 / (now - startTime)
-                                        lastAttemptTime = now
-                                    }
-                                }
-                                
-                                if (!currentResult?.found!! && currentAttempt > endAttempt) {
-                                    currentResult = currentResult?.copy(
-                                        password = "Not found in range ${searchRange?.start} to ${searchRange?.end}"
-                                    )
-                                }
-                            }
-                        } catch (e: NumberFormatException) {
-                            // Handle invalid input
-                        }
-                    }
-                },
-                modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (isCalculating) 
-                        MaterialTheme.colorScheme.error 
-                    else 
-                        MaterialTheme.colorScheme.primary
-                ),
-                enabled = isCalculating || (selectedNode != null && targetHash.isNotEmpty())
-            ) {
-                Text(
-                    text = if (isCalculating) "Stop Cracking" else "Start Cracking",
-                    modifier = Modifier.padding(8.dp)
-                )
+                        currentPacket = null
+                    },
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error
+                    ),
+                    enabled = isCalculating
+                ) {
+                    Text(
+                        text = "Stop Current Job",
+                        modifier = Modifier.padding(8.dp)
+                    )
+                }
             }
         }
     }
